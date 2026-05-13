@@ -19,14 +19,16 @@ const app = express();
 app.use(express.json());
 app.use(cors({ origin: ALLOWED_ORIGIN || '*' }));
 
-const runway = new RunwayML({ apiKey: RUNWAYML_API_SECRET });
+// SDK auto-reads RUNWAYML_API_SECRET from env
+const runway = new RunwayML();
 const handlers = new Map();
 
 app.get('/', (_req, res) => res.send('ok'));
 
 app.post('/session', async (_req, res) => {
   try {
-    const session = await runway.realtimeSessions.create({
+    // 1. Create the session with our tool declared
+    const { id: sessionId } = await runway.realtimeSessions.create({
       model: 'gwm1_avatars',
       avatar: { type: 'custom', avatarId: RUNWAY_AVATAR_ID },
       tools: [{
@@ -41,9 +43,41 @@ app.post('/session', async (_req, res) => {
       }],
     });
 
+    console.log('created session', sessionId);
+
+    // 2. Poll until READY (typically 3-8 seconds)
+    let sessionKey;
+    for (let i = 0; i < 60; i++) {
+      const s = await runway.realtimeSessions.retrieve(sessionId);
+      if (s.status === 'READY') { sessionKey = s.sessionKey; break; }
+      if (s.status === 'FAILED') {
+        return res.status(500).json({ error: s.failure || 'session failed' });
+      }
+      await new Promise(r => setTimeout(r, 1000));
+    }
+    if (!sessionKey) return res.status(504).json({ error: 'session timed out' });
+
+    // 3. Consume to get LiveKit credentials
+    const consumeRes = await fetch(
+      `${runway.baseURL}/v1/realtime_sessions/${sessionId}/consume`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${sessionKey}`,
+          'X-Runway-Version': '2024-11-06',
+        },
+      }
+    );
+    if (!consumeRes.ok) {
+      const t = await consumeRes.text();
+      return res.status(500).json({ error: `consume failed: ${t}` });
+    }
+    const credentials = await consumeRes.json();
+
+    // 4. Start the RPC handler for this session (forwards tool calls to n8n)
     const handler = await createRpcHandler({
       apiKey: RUNWAYML_API_SECRET,
-      sessionId: session.id,
+      sessionId,
       tools: {
         ask_sales_assistant: async (args) => {
           try {
@@ -52,7 +86,7 @@ app.post('/session', async (_req, res) => {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 message: String(args.user_message || ''),
-                sessionId: String(args.session_id || session.id),
+                sessionId: String(args.session_id || sessionId),
                 source: 'runway-avatar',
               }),
               signal: AbortSignal.timeout(7500),
@@ -70,13 +104,19 @@ app.post('/session', async (_req, res) => {
           }
         },
       },
-      onConnected: () => console.log('rpc connected', session.id),
-      onDisconnected: () => handlers.delete(session.id),
+      onConnected: () => console.log('rpc connected', sessionId),
+      onDisconnected: () => handlers.delete(sessionId),
       onError: (e) => console.error('rpc err:', e),
     });
+    handlers.set(sessionId, handler);
 
-    handlers.set(session.id, handler);
-    res.json(session);
+    // 5. Return credentials to the browser
+    res.json({
+      sessionId,
+      serverUrl: credentials.url,
+      token: credentials.token,
+      roomName: credentials.roomName,
+    });
   } catch (e) {
     console.error('session fail:', e);
     res.status(500).json({ error: e.message });
