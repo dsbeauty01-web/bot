@@ -1,0 +1,13 @@
+{
+  "name": "runway-sales-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "engines": { "node": ">=18" },
+  "scripts": { "start": "node server.js" },
+  "dependencies": {
+    "@runwayml/sdk": "^2.0.0",
+    "@runwayml/avatars-node-rpc": "^0.1.0",
+    "express": "^4.19.2",
+    "cors": "^2.8.5"
+  }
+}
