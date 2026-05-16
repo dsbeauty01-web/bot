@@ -2,8 +2,8 @@
 //  Mika Bot Server — refael-ai-flow
 //  Runs on Render at https://bot-vibk.onrender.com
 //
-//  One brain (Mika via Runway), one tool (save_lead -> dumb n8n webhook -> Gmail).
-//  No more AI agent in n8n. No more Pinecone in the live path.
+//  Mika answers from her Runway Knowledge Base (uploaded in the portal).
+//  Lead capture goes through save_lead -> n8n -> Gmail.
 // ============================================================
 
 import express from 'express';
@@ -14,8 +14,8 @@ import { createRpcHandler } from '@runwayml/avatars-node-rpc';
 const {
   RUNWAYML_API_SECRET,
   RUNWAY_AVATAR_ID,
-  N8N_LEAD_WEBHOOK,     // NEW: dumb webhook -> Gmail. e.g. https://rafa5555.app.n8n.cloud/webhook/lead-email
-  N8N_WEBHOOK_URL,      // OLD: still read for backward-compat (used as fallback only)
+  N8N_LEAD_WEBHOOK,
+  N8N_WEBHOOK_URL,
   ALLOWED_ORIGIN,
   PORT = 3000,
 } = process.env;
@@ -37,41 +37,41 @@ const runway = new RunwayML({ apiKey: RUNWAYML_API_SECRET });
 const handlers = new Map();
 
 // ============================================================
-//  Mika personality — single source of truth.
-//  Sent on every session create, overrides the portal default.
+//  Mika personality.
+//  PRICING + FEATURES come from the Runway Knowledge Base, NOT this prompt.
+//  Only the lead-capture flow + "no monthly fees" rule live here.
 // ============================================================
-const MIKA_PERSONALITY = `את מיקה, העוזרת של רפאל סילניקובה — בונה בוטים ואבטרים מדברים לעסקים קטנים בישראל.
+const MIKA_PERSONALITY = `את מיקה, העוזרת של רפאל סילניקובה. רפאל בונה בוטים, אבטרים מדברים ואוטומציות לעסקים קטנים בישראל.
 
-שפה: זיהוי אוטומטי. עברית מקבל עברית. אנגלית מקבל אנגלית. לעולם לא לערבב באותה תשובה.
+שפה:
+- זיהוי אוטומטי. עברית -> עברית. אנגלית -> אנגלית.
+- לעולם אל תערבבי שפות באותה תשובה.
 
-סגנון: 1 עד 3 משפטים קצרים. טון ישראלי ישיר. בלי אימוג'ים. בלי ז'רגון טכני. ענייניית, חברותית, לא דוחפת.
+סגנון:
+- 1 עד 3 משפטים קצרים. טון ישראלי ישיר. בלי אימוג'ים. בלי ז'רגון.
+- ענייניית וחברותית. לא דוחפת.
 
-מה רפאל עושה:
-- בוטי הזמנת תורים
-- בוטי מכירה (קטלוג, המלצות, FAQ)
-- אבטרים מדברים (כמוני)
-- אוטומציות מותאמות, אינטגרציות וואטסאפ/CRM/אימייל
+מקור המידע שלך:
+- כל פרטי השירותים, המחירים, ההיקפים והאינטגרציות נמצאים בבסיס הידע שלך.
+- עני תמיד מהידע שלך. אל תמציאי מחירים, תאריכים או פיצ'רים.
+- אם שאלה לא מכוסה בידע - אמרי: "רפאל יענה לך על זה ישירות, אפשר להשאיר פרטים?"
 
-תמחור — חשוב:
-- הקמה: מ-600 שקלים, חד פעמי בלבד.
-- אין דמי מנוי חודשיים. בכלל. אף פעם.
-- אספקה: 3 עד 7 ימים.
-- ייעוץ ראשוני 15 דקות חינם.
-- בוט פשוט: 600 ש"ח. בוט חנות עם וואטסאפ: 1500-2500. אבטר כמוני: 2500-4000. הכל גמיש לפי scope.
+חוק חזק על מחירים:
+- אין דמי מנוי חודשיים. בכלל. אף פעם. רק הקמה חד פעמית.
+- אם המשתמש שואל על "מנוי" או "תשלום חודשי", הסבירי שאין כזה.
 
-תפקיד שלך:
+תפקיד שלך - לאסוף ליד:
 1. ברכי, שאלי איזה עסק יש למשתמש.
-2. עני על שאלות מהידע שלך.
-3. כשהמשתמש מתעניין, אספי: שם → טלפון או אימייל → סוג עסק.
-4. ברגע שיש לך שלושת הפרטים, קראי לטול save_lead פעם אחת.
-5. אחרי שהטול הצליח: "תודה, רפאל יחזור אלייך תוך שעתיים."
+2. עני על שאלות מבסיס הידע שלך.
+3. כשהמשתמש מתעניין, אספי בסדר הזה: שם -> טלפון או אימייל -> סוג עסק.
+4. ברגע שיש לך את שלושת הפרטים, קראי לטול save_lead פעם אחת בלבד.
+5. אחרי שהטול הצליח, אמרי: "תודה, רפאל יחזור אלייך תוך שעתיים."
 
-חוקים:
-- אל תמציאי מחירים או פיצ'רים.
-- אל תזכירי מנוי חודשי — אין כזה.
-- אל תקראי לטול save_lead יותר מפעם אחת באותה שיחה.
+חוקים נוקשים:
+- אל תקראי ל-save_lead יותר מפעם אחת באותה שיחה.
 - אל תבקשי מידע שהמשתמש כבר נתן.
-- אם שאלה טכנית עמוקה שאת לא בטוחה — "רפאל יענה לך על זה ישירות, אפשר להשאיר פרטים?"`;
+- אל תמציאי. רק מהידע + מחוק "אין מנוי חודשי".
+- בלי לערבב שפות.`;
 
 const MIKA_START_SCRIPT = 'היי, אני מיקה — איזה עסק יש לך?';
 
@@ -85,7 +85,6 @@ app.post('/session', async (req, res) => {
   try {
     const clientSessionId = req.body?.sessionId || null;
 
-    // 1. Create session with the save_lead tool + Mika personality override
     const { id: sessionId } = await runway.realtimeSessions.create({
       model: 'gwm1_avatars',
       avatar: { type: 'custom', avatarId: RUNWAY_AVATAR_ID },
@@ -106,7 +105,6 @@ app.post('/session', async (req, res) => {
     });
     console.log('[session] created', sessionId, 'client:', clientSessionId);
 
-    // 2. Poll until READY
     let sessionKey;
     for (let i = 0; i < 60; i++) {
       const s = await runway.realtimeSessions.retrieve(sessionId);
@@ -118,7 +116,6 @@ app.post('/session', async (req, res) => {
     }
     if (!sessionKey) return res.status(504).json({ error: 'session timed out' });
 
-    // 3. Consume to get LiveKit credentials
     const consumeRes = await fetch(
       `https://api.dev.runwayml.com/v1/realtime_sessions/${sessionId}/consume`,
       {
@@ -135,8 +132,7 @@ app.post('/session', async (req, res) => {
     }
     const credentials = await consumeRes.json();
 
-    // 4. Start RPC handler — forwards save_lead -> dumb n8n webhook -> Gmail
-    const leadFired = new Set(); // dedupe within this session
+    const leadFired = new Set();
     const handler = await createRpcHandler({
       apiKey: RUNWAYML_API_SECRET,
       sessionId,
@@ -150,7 +146,6 @@ app.post('/session', async (req, res) => {
             return { result: 'missing_required_fields', message: 'Need name and contact.' };
           }
 
-          // Dedupe: if Mika tries to fire it twice in one session, no-op the second.
           const key = `${name}|${contact}`.toLowerCase();
           if (leadFired.has(key)) {
             console.log('[save_lead] duplicate suppressed', key);
@@ -185,7 +180,7 @@ app.post('/session', async (req, res) => {
             };
           } catch (e) {
             console.error('[save_lead] fail:', e.message);
-            leadFired.delete(key); // allow retry
+            leadFired.delete(key);
             return {
               result: 'error',
               message:
@@ -200,7 +195,6 @@ app.post('/session', async (req, res) => {
     });
     handlers.set(sessionId, handler);
 
-    // 5. Return credentials to browser
     res.json({
       sessionId,
       serverUrl: credentials.serverUrl || credentials.url || credentials.wsUrl,
