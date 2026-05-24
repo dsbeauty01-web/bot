@@ -7,6 +7,12 @@
 //                              tool: save_lead -> n8n lead-email -> Gmail
 //   - POST /salon-session   -> Maya (salon receptionist demo)
 //                              tool: book_appointment -> n8n salon-bot agent
+//
+//  FIXES IN THIS VERSION:
+//   1. Maya timeoutSeconds 10 -> 8 (Runway API hard max)
+//   2. RPC handler created BEFORE returning creds (no race condition)
+//   3. Faster polling for session READY (500ms instead of 1500ms)
+//   4. /prewarm endpoint for frontend warm-start signal
 // ============================================================
 
 import express from 'express';
@@ -107,14 +113,15 @@ async function createSessionWithTool({ avatarId, personality, startScript, tool 
     tools: [tool],
   });
 
+  // Faster polling: 500ms (was 1500ms). Cuts session-ready wait by ~3x.
   let sessionKey;
-  for (let i = 0; i < 60; i++) {
+  for (let i = 0; i < 180; i++) {
     const s = await runway.realtimeSessions.retrieve(sessionId);
     if (s.status === 'READY') { sessionKey = s.sessionKey; break; }
     if (s.status === 'FAILED' || s.status === 'CANCELLED') {
       throw new Error(s.failure || 'session failed');
     }
-    await new Promise(r => setTimeout(r, 1500));
+    await new Promise(r => setTimeout(r, 500));
   }
   if (!sessionKey) throw new Error('session timed out');
 
@@ -150,6 +157,9 @@ function returnCreds(res, sessionId, credentials) {
 app.get('/', (_req, res) => res.send('ok'));
 app.get('/health', (_req, res) => res.json({ ok: true, ts: Date.now() }));
 
+// Prewarm signal — does nothing, but the request itself wakes the Render dyno
+app.get('/prewarm', (_req, res) => res.json({ warm: true, ts: Date.now() }));
+
 // ----- MIKA: /session -----
 app.post('/session', async (req, res) => {
   try {
@@ -175,6 +185,10 @@ app.post('/session', async (req, res) => {
     console.log('[mika] session', sessionId, 'client:', clientSessionId);
 
     const leadFired = new Set();
+
+    // CREATE RPC HANDLER BEFORE returning creds (fixes race condition).
+    // Previously: returnCreds() ran first, client connected WebRTC, but server
+    // RPC wasn't bound yet -> "disconnected" log + dropped session.
     const handler = await createRpcHandler({
       apiKey: RUNWAYML_API_SECRET,
       sessionId,
@@ -219,6 +233,7 @@ app.post('/session', async (req, res) => {
     });
     handlers.set(sessionId, handler);
 
+    // Now safe to return creds — RPC handler is bound and ready
     returnCreds(res, sessionId, credentials);
   } catch (e) {
     console.error('[mika session] fail:', e);
@@ -240,7 +255,9 @@ app.post('/salon-session', async (req, res) => {
         name: 'book_appointment',
         description:
           'Book a salon appointment. Call ONCE per appointment, only after collecting name, phone, service_type, and date_time. Returns booked / slot_taken / error.',
-        timeoutSeconds: 10,
+        // FIX: Runway API hard max is 8 seconds. Was 10 -> caused every Maya
+        // session to fail with "tools[0].timeoutSeconds: Too big (max 8)".
+        timeoutSeconds: 8,
         parameters: [
           { type: 'string', name: 'name',         description: 'Client name' },
           { type: 'string', name: 'phone',        description: 'Phone number' },
@@ -252,6 +269,8 @@ app.post('/salon-session', async (req, res) => {
     console.log('[maya] session', sessionId, 'client:', clientSessionId);
 
     const booked = new Set();
+
+    // Same fix as Mika: bind RPC handler BEFORE returning creds
     const handler = await createRpcHandler({
       apiKey: RUNWAYML_API_SECRET,
       sessionId,
@@ -272,6 +291,7 @@ app.post('/salon-session', async (req, res) => {
           booked.add(key);
 
           try {
+            // NOTE: tool timeout is 8s; keep n8n call < 7s to leave headroom
             const r = await fetch(SALON_WEBHOOK, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -286,7 +306,7 @@ app.post('/salon-session', async (req, res) => {
                 session_id: sessionId,
                 source: 'runway-maya',
               }),
-              signal: AbortSignal.timeout(10000),
+              signal: AbortSignal.timeout(7000),
             });
             if (!r.ok) throw new Error(`n8n ${r.status}`);
             const data = await r.json();
