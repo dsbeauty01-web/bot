@@ -50,6 +50,28 @@ const runway = new RunwayML({ apiKey: RUNWAYML_API_SECRET });
 const handlers = new Map();
 
 // ============================================================
+//  RATE LIMITING (daily server-wide kill switch)
+// ============================================================
+const DAILY_CAP = Number(process.env.DAILY_SESSION_CAP || 40);
+let sessionsToday = 0;
+let dayKey = new Date().toISOString().slice(0, 10); // YYYY-MM-DD UTC
+
+function checkAndIncrementDailyCap() {
+  const today = new Date().toISOString().slice(0, 10);
+  if (today !== dayKey) {
+    dayKey = today;
+    sessionsToday = 0;
+    console.log('[rate-limit] new day, counter reset');
+  }
+  if (sessionsToday >= DAILY_CAP) {
+    return false;
+  }
+  sessionsToday += 1;
+  console.log(`[rate-limit] session ${sessionsToday}/${DAILY_CAP} today`);
+  return true;
+}
+
+// ============================================================
 //  Personalities
 // ============================================================
 const MIKA_PERSONALITY = `את מיקה, העוזרת של רפאל סילניקובה. רפאל בונה בוטים, אבטרים מדברים ואוטומציות לעסקים קטנים בישראל.
@@ -71,35 +93,35 @@ const MIKA_PERSONALITY = `את מיקה, העוזרת של רפאל סילניק
 
 const MIKA_START = 'היי, אני מיקה — איזה עסק יש לך?';
 
-const MAYA_PERSONALITY = `את מאיה, מזכירה דיגיטלית של מספרת/קליניקת ציפורניים "Glow Studio" בתל אביב. זה דמו חי - המטרה שלך לקבל את הפרטים ולשלוח אישור במייל.
+const MAYA_PERSONALITY = `את מאיה, מזכירה דיגיטלית במספרה "Glow Studio" בתל אביב. דמו חי.
 
-שפה: זיהוי אוטומטי. עברית -> עברית. אנגלית -> אנגלית. לעולם אל תערבבי שפות.
+המטרה היחידה שלך: לאסוף 4 פרטים ולקרוא לטול book_appointment.
 
-סגנון: 1-3 משפטים קצרים. חמה, מקצועית, יעילה. בלי אימוג'ים. בלי ז'רגון.
+הפרטים הנדרשים:
+1. שם
+2. אימייל (חייב להכיל @)
+3. סוג שירות (תספורת, מניקור, צבע, וכו')
+4. תאריך + שעה
 
-מקור המידע שלך: בסיס הידע שלך מכיל מחירים, שירותים, שעות פתיחה. עני תמיד משם. אל תמציאי.
+כללי עבודה:
+- ענייני בעברית קצרה, 1-2 משפטים בלבד.
+- בכל תשובה: אם חסר פרט - בקשי אותו. אם יש 4 פרטים - קראי לטול מיד.
+- אסור לבקש מידע שכבר ניתן.
+- אסור לערבב שפות.
+- אסור להמציא מחירים או שירותים.
+- אסור לחזור על הברכה.
 
-תפקיד שלך - לקבוע תור ולשלוח אישור במייל:
-1. ברכי, שאלי איך אפשר לעזור.
-2. עני על שאלות שירותים/מחירים/שעות מבסיס הידע.
-3. לקביעת תור, אספי בסדר הזה:
-   - שם הלקוח/ה
-   - כתובת אימייל (חייב להכיל @)
-   - סוג שירות (מתוך הרשימה בידע)
-   - תאריך ושעה מועדפים
-4. ברגע שיש ארבעת הפרטים, קראי ל-book_appointment פעם אחת מיד.
-5. תמיד הניחי שהזמן פנוי. זה דמו.
-6. אחרי שהטול הצליח: "שלחתי לך אישור במייל ל-[email]. נתראה ב-[date_time]!"
+איך לקרוא לטול:
+ברגע שיש שם + אימייל + שירות + תאריך, קראי ל-book_appointment עם הפרמטרים. אל תשאלי "האם לקבוע?". אל תגידי "אני מקבעת". פשוט קראי לטול ואז דווחי על התוצאה.
 
-חוקים נוקשים:
-- אל תקבעי תור בלי ארבעת הפרטים.
-- אל תקראי ל-book_appointment יותר מפעם אחת.
-- אם הטול מחזיר error: התנצלי, בקשי שיתקשרו 03-555-1234.
-- אם הטול מחזיר invalid_email: בקשי אימייל תקין שוב.
-- אל תבקשי מידע שכבר ניתן.
-- אל תאמרי "יש בעיה במערכת" בלי לקרוא קודם לטול. אם לא קראת לטול - אין לך שגיאה לדווח עליה.
-- בלי לערבב שפות.
-- אל תמציאי שירותים, מחירים, או זמנים.`;
+תוצאות הטול:
+- booked: "שלחתי לך אישור במייל. נתראה ב-[date_time]!"
+- invalid_email: "האימייל לא תקין, אפשר לחזור עליו?"
+- error: "סליחה, נסי שוב או צרי קשר בטלפון 03-555-1234."
+
+חוק קריטי: אסור לומר שיש שגיאה אם לא קראת לטול. אם לא הייתה קריאה לטול - אין מה לדווח עליו.
+
+תמיד הניחי שהשעה פנויה. זה דמו, לא יומן אמיתי.`;
 
 const MAYA_START = 'היי, אני מאיה! איך אפשר לעזור היום?';
 
@@ -164,6 +186,10 @@ app.get('/prewarm', (_req, res) => res.json({ warm: true, ts: Date.now() }));
 
 // ----- MIKA: /session -----
 app.post('/session', async (req, res) => {
+  if (!checkAndIncrementDailyCap()) {
+    console.warn('[mika] daily cap reached');
+    return res.status(429).json({ error: 'daily_cap', message: 'Daily session limit reached. Try again tomorrow.' });
+  }
   try {
     const clientSessionId = req.body?.sessionId || null;
 
@@ -245,6 +271,10 @@ app.post('/session', async (req, res) => {
 
 // ----- MAYA (SALON): /salon-session -----
 app.post('/salon-session', async (req, res) => {
+  if (!checkAndIncrementDailyCap()) {
+    console.warn('[maya] daily cap reached');
+    return res.status(429).json({ error: 'daily_cap', message: 'Daily session limit reached. Try again tomorrow.' });
+  }
   try {
     const clientSessionId = req.body?.sessionId || null;
 
