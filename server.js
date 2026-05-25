@@ -71,33 +71,35 @@ const MIKA_PERSONALITY = `את מיקה, העוזרת של רפאל סילניק
 
 const MIKA_START = 'היי, אני מיקה — איזה עסק יש לך?';
 
-const MAYA_PERSONALITY = `את מאיה, מזכירה דיגיטלית של מספרת/קליניקת ציפורניים "Glow Studio" בתל אביב.
+const MAYA_PERSONALITY = `את מאיה, מזכירה דיגיטלית של מספרת/קליניקת ציפורניים "Glow Studio" בתל אביב. זה דמו חי - המטרה שלך לקבל את הפרטים ולשלוח אישור במייל.
 
 שפה: זיהוי אוטומטי. עברית -> עברית. אנגלית -> אנגלית. לעולם אל תערבבי שפות.
 
 סגנון: 1-3 משפטים קצרים. חמה, מקצועית, יעילה. בלי אימוג'ים. בלי ז'רגון.
 
-מקור המידע שלך: בסיס הידע שלך מכיל מחירים, שירותים, שעות פתיחה, מדיניות. עני תמיד משם. אל תמציאי.
+מקור המידע שלך: בסיס הידע שלך מכיל מחירים, שירותים, שעות פתיחה. עני תמיד משם. אל תמציאי.
 
-תפקיד שלך - לקבוע תור:
+תפקיד שלך - לקבוע תור ולשלוח אישור במייל:
 1. ברכי, שאלי איך אפשר לעזור.
 2. עני על שאלות שירותים/מחירים/שעות מבסיס הידע.
 3. לקביעת תור, אספי בסדר הזה:
    - שם הלקוח/ה
-   - מספר טלפון
+   - כתובת אימייל (חייב להכיל @)
    - סוג שירות (מתוך הרשימה בידע)
    - תאריך ושעה מועדפים
-4. ברגע שיש ארבעת הפרטים, קראי ל-book_appointment פעם אחת.
-5. אחרי שהצליח: "התור שלך נקבע ל-[תאריך] בשעה [שעה]. נתראה!"
+4. ברגע שיש ארבעת הפרטים, קראי ל-book_appointment פעם אחת מיד.
+5. תמיד הניחי שהזמן פנוי. זה דמו.
+6. אחרי שהטול הצליח: "שלחתי לך אישור במייל ל-[email]. נתראה ב-[date_time]!"
 
 חוקים נוקשים:
 - אל תקבעי תור בלי ארבעת הפרטים.
 - אל תקראי ל-book_appointment יותר מפעם אחת.
-- אם הטול מחזיר slot_taken: התנצלי, הציעי 2 אפשרויות סמוכות.
 - אם הטול מחזיר error: התנצלי, בקשי שיתקשרו 03-555-1234.
+- אם הטול מחזיר invalid_email: בקשי אימייל תקין שוב.
 - אל תבקשי מידע שכבר ניתן.
+- אל תאמרי "יש בעיה במערכת" בלי לקרוא קודם לטול. אם לא קראת לטול - אין לך שגיאה לדווח עליה.
 - בלי לערבב שפות.
-- אל תמציאי שעות פנויות בלי לבדוק.`;
+- אל תמציאי שירותים, מחירים, או זמנים.`;
 
 const MAYA_START = 'היי, אני מאיה! איך אפשר לעזור היום?';
 
@@ -254,15 +256,15 @@ app.post('/salon-session', async (req, res) => {
         type: 'backend_rpc',
         name: 'book_appointment',
         description:
-          'Book a salon appointment. Call ONCE per appointment, only after collecting name, phone, service_type, and date_time. Returns booked / slot_taken / error.',
+          'Book a salon appointment and send confirmation email. Call ONCE per appointment, only after collecting name, email, service_type, and date_time. Returns booked / error.',
         // FIX: Runway API hard max is 8 seconds. Was 10 -> caused every Maya
         // session to fail with "tools[0].timeoutSeconds: Too big (max 8)".
         timeoutSeconds: 8,
         parameters: [
-          { type: 'string', name: 'name',         description: 'Client name' },
-          { type: 'string', name: 'phone',        description: 'Phone number' },
-          { type: 'string', name: 'service_type', description: 'Service requested (use exact name from knowledge)' },
-          { type: 'string', name: 'date_time',    description: 'Preferred date and time in natural language' },
+          { type: 'string', name: 'name',         description: 'Client full name' },
+          { type: 'string', name: 'email',        description: 'Client email address (must contain @)' },
+          { type: 'string', name: 'service_type', description: 'Service requested (use exact name from knowledge base)' },
+          { type: 'string', name: 'date_time',    description: 'Preferred date and time in natural language (e.g. "tomorrow at 3pm" or "מחר ב-15:00")' },
         ],
       },
     });
@@ -277,21 +279,24 @@ app.post('/salon-session', async (req, res) => {
       tools: {
         book_appointment: async (args) => {
           const name = String(args?.name || '').trim();
-          const phone = String(args?.phone || '').trim();
+          const email = String(args?.email || '').trim();
           const service = String(args?.service_type || '').trim();
           const when = String(args?.date_time || '').trim();
 
-          if (!name || !phone || !service || !when) {
-            return { result: 'missing_required_fields', message: 'Need name, phone, service, and date/time.' };
+          if (!name || !email || !service || !when) {
+            return { result: 'missing_required_fields', message: 'Need name, email, service, and date/time.' };
           }
-          const key = `${name}|${phone}|${when}`.toLowerCase();
+          if (!email.includes('@')) {
+            return { result: 'invalid_email', message: 'Email format is invalid. Ask user for a valid email.' };
+          }
+          const key = `${name}|${email}|${when}`.toLowerCase();
           if (booked.has(key)) {
             return { result: 'already_booked', message: 'Already booked. Tell user it is confirmed.' };
           }
           booked.add(key);
 
           try {
-            // NOTE: tool timeout is 8s; keep n8n call < 7s to leave headroom
+            // Send a clean JSON-like message that n8n agent can parse and pass to Gmail tool
             const r = await fetch(SALON_WEBHOOK, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -299,12 +304,12 @@ app.post('/salon-session', async (req, res) => {
                 messages: [{
                   role: 'user',
                   content:
-                    `BOOKING_REQUEST: name="${name}", phone="${phone}", service="${service}", date_time="${when}". ` +
-                    `Check calendar availability, create event if free, append to sheet, then reply with only one of these tokens: ` +
-                    `BOOKED:<confirmed_iso_datetime> | SLOT_TAKEN | ERROR.`,
+                    `BOOKING_REQUEST: name="${name}", email="${email}", service="${service}", date_time="${when}". ` +
+                    `Send confirmation email via gmail tool. Reply with only "BOOKED" if email sent successfully, or "ERROR" if not.`,
                 }],
                 session_id: sessionId,
                 source: 'runway-maya',
+                booking: { name, email, service, date_time: when },
               }),
               signal: AbortSignal.timeout(7000),
             });
@@ -316,21 +321,14 @@ app.post('/salon-session', async (req, res) => {
             const reply = String(replyText).toUpperCase();
 
             if (reply.includes('BOOKED')) {
-              console.log('[book_appointment] ok', name, when);
+              console.log('[book_appointment] ok', name, email, when);
               return {
                 result: 'booked',
-                message: `Booked. Tell user: "התור שלך נקבע ל-${when}. נתראה!"`,
-              };
-            }
-            if (reply.includes('SLOT_TAKEN')) {
-              booked.delete(key);
-              return {
-                result: 'slot_taken',
-                message: 'Slot taken. Apologize, suggest 2 alternatives (30min before/after, or next day same time).',
+                message: `Booked and email sent. Tell user: "שלחתי לך אישור במייל ל-${email}. נתראה ב-${when}!"`,
               };
             }
             booked.delete(key);
-            return { result: 'error', message: 'Booking error. Apologize, ask user to call 03-555-1234.' };
+            return { result: 'error', message: 'Email send failed. Apologize, ask user to call 03-555-1234.' };
           } catch (e) {
             console.error('[book_appointment] fail:', e.message);
             booked.delete(key);
