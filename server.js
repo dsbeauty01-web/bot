@@ -51,12 +51,14 @@ const handlers = new Map();
 
 // ============================================================
 //  RATE LIMITING (daily server-wide kill switch)
+//  Set DAILY_SESSION_CAP env var to enable. 0 or unset = unlimited.
 // ============================================================
-const DAILY_CAP = Number(process.env.DAILY_SESSION_CAP || 40);
+const DAILY_CAP = Number(process.env.DAILY_SESSION_CAP || 0);
 let sessionsToday = 0;
-let dayKey = new Date().toISOString().slice(0, 10); // YYYY-MM-DD UTC
+let dayKey = new Date().toISOString().slice(0, 10);
 
 function checkAndIncrementDailyCap() {
+  if (DAILY_CAP <= 0) return true; // unlimited
   const today = new Date().toISOString().slice(0, 10);
   if (today !== dayKey) {
     dayKey = today;
